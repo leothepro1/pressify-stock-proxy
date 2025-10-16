@@ -10,6 +10,24 @@ const PEXELS_KEY = process.env.PEXELS_API_KEY;
 const pump = promisify(pipeline);
 
 /* ---------------------------
+   Helpers
+----------------------------*/
+function pickFilenameFromUrl(u) {
+  const last = u.pathname.split("/").pop() || "image";
+  return last.includes(".") ? last : `${last}.jpg`;
+}
+
+async function maybeLoadSharp() {
+  try {
+    // Dynamisk import så appen funkar även utan sharp installerat
+    const mod = await import("sharp");
+    return mod.default || mod;
+  } catch {
+    return null;
+  }
+}
+
+/* ---------------------------
    Normalisering från Pexels
 ----------------------------*/
 function normalizePexels(photo) {
@@ -30,11 +48,13 @@ function normalizePexels(photo) {
     author: photo.photographer,
     author_url: photo.photographer_url,
     attribution_required: false,
-    // Token som frontenden kan ge till /download
+    // Token för /download (vi lägger även width/height i token för UI-etiketter om du vill läsa därifrån)
     download_token: Buffer.from(
       JSON.stringify({
         src: "pexels",
         download_url: photo.src?.original,
+        width: photo.width,
+        height: photo.height
       })
     ).toString("base64"),
   };
@@ -49,10 +69,9 @@ app.get("/search", async (req, res) => {
     const page = Math.max(1, Number(req.query.page || 1));
     const per_page = Math.min(80, Math.max(1, Number(req.query.per_page || 48)));
 
-    // Vidarebefordra extra filter (om klienten skickar dem)
-    const orientation = (req.query.orientation || "").trim(); // 'landscape'|'portrait'|'square'
-    const color = (req.query.color || "").trim();             // 'red'|'orange'|...|'white'
-    const size = (req.query.size || "").trim();               // 'small'|'medium'|'large'
+    const orientation = (req.query.orientation || "").trim();
+    const color = (req.query.color || "").trim();
+    const size = (req.query.size || "").trim();
 
     const isTrending = !q || q.toLowerCase() === "trending";
     const base = isTrending
@@ -73,7 +92,6 @@ app.get("/search", async (req, res) => {
 
     const results = (j.photos || []).map(normalizePexels);
 
-    // Robust has_more
     let has_more = false;
     if (typeof j.total_results === "number") {
       has_more = page * per_page < j.total_results;
@@ -81,7 +99,6 @@ app.get("/search", async (req, res) => {
       has_more = true;
     }
 
-    // Lätt cache på första sidan (övriga no-store)
     if (page === 1) {
       res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=600");
     } else {
@@ -89,13 +106,13 @@ app.get("/search", async (req, res) => {
     }
 
     res.json({ results, page, per_page, total: j.total_results, has_more });
-  } catch (e) {
+  } catch {
     res.status(500).json({ error: "server_error" });
   }
 });
 
 /* -------------------------------------------
-   /download – streama som attachment (FIX)
+   /download – original eller resize (w/h)
 --------------------------------------------*/
 app.get("/download", async (req, res) => {
   try {
@@ -109,42 +126,86 @@ app.get("/download", async (req, res) => {
       return res.status(400).json({ error: "bad_token" });
     }
 
-    const fileUrl = payload?.download_url;
-    if (!fileUrl) return res.status(400).json({ error: "bad_token" });
+    const fileUrlStr = payload?.download_url;
+    if (!fileUrlStr) return res.status(400).json({ error: "bad_token" });
 
-    // Hämta originalet från Pexels
-    const upstream = await fetch(fileUrl);
+    const wantW = req.query.w ? Math.max(1, parseInt(String(req.query.w), 10)) : null;
+    const wantH = req.query.h ? Math.max(1, parseInt(String(req.query.h), 10)) : null;
+
+    // Hämta original från Pexels
+    const upstream = await fetch(fileUrlStr);
     if (!upstream.ok) return res.status(upstream.status).json({ error: "upstream_error" });
 
-    // Gissa filnamn från URL (sista path-segmentet)
-    const u = new URL(fileUrl);
-    const last = u.pathname.split("/").pop() || "image";
-    const filename = last.includes(".") ? last : `${last}.jpg`;
+    const u = new URL(fileUrlStr);
+    const baseName = pickFilenameFromUrl(u);
 
-    // Sätt headers för faktisk nedladdning
-    const ct = upstream.headers.get("content-type") || "application/octet-stream";
-    const cl = upstream.headers.get("content-length");
-    res.setHeader("Content-Type", ct);
-    if (cl) res.setHeader("Content-Length", cl);
-    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    // Om ingen resize önskas -> streama original som attachment
+    if (!wantW && !wantH) {
+      const ct = upstream.headers.get("content-type") || "application/octet-stream";
+      const cl = upstream.headers.get("content-length");
+      res.setHeader("Content-Type", ct);
+      if (cl) res.setHeader("Content-Length", cl);
+      res.setHeader("Content-Disposition", `attachment; filename="${baseName}"`);
+      res.setHeader("Cache-Control", "private, max-age=0");
+
+      const nodeStream =
+        typeof upstream.body?.getReader === "function"
+          ? Readable.fromWeb(upstream.body)
+          : upstream.body;
+
+      await pump(nodeStream, res);
+      return;
+    }
+
+    // Resize begärd -> försök med sharp
+    const Sharp = await maybeLoadSharp();
+    if (!Sharp) {
+      // Fallback: saknas sharp -> ge originalet (hellre ladda ner än fel)
+      const ct = upstream.headers.get("content-type") || "application/octet-stream";
+      const cl = upstream.headers.get("content-length");
+      res.setHeader("Content-Type", ct);
+      if (cl) res.setHeader("Content-Length", cl);
+      res.setHeader("Content-Disposition", `attachment; filename="${baseName}"`);
+      res.setHeader("Cache-Control", "private, max-age=0");
+
+      const nodeStream =
+        typeof upstream.body?.getReader === "function"
+          ? Readable.fromWeb(upstream.body)
+          : upstream.body;
+
+      await pump(nodeStream, res);
+      return;
+    }
+
+    // Läs in originalet i buffer (krävs för sharp)
+    const origBuf = Buffer.from(await upstream.arrayBuffer());
+
+    // Bygg filnamn, ex: pexels-photo-xxxx_640x426.jpg
+    const suffix =
+      (wantW || "") + (wantW && wantH ? "x" : "") + (wantH || "");
+    const outName = suffix
+      ? baseName.replace(/(\.[a-z0-9]+)$/i, `_${suffix}$1`)
+      : baseName;
+
+    // Kör resize (cover = fyller exakt W x H, beskär vid behov)
+    let inst = Sharp(origBuf);
+    if (wantW && wantH) inst = inst.resize(wantW, wantH, { fit: "cover" });
+    else if (wantW)     inst = inst.resize(wantW, null, { fit: "inside" });
+    else if (wantH)     inst = inst.resize(null, wantH, { fit: "inside" });
+
+    const ctOut = "image/jpeg";
+    res.setHeader("Content-Type", ctOut);
+    res.setHeader("Content-Disposition", `attachment; filename="${outName}"`);
     res.setHeader("Cache-Control", "private, max-age=0");
 
-    // node-fetch v3 -> Web ReadableStream; konvertera till Node stream
-    const nodeStream =
-      typeof upstream.body?.getReader === "function"
-        ? Readable.fromWeb(upstream.body)
-        : upstream.body;
+    // Streama sharp-output
+    const outStream = inst.jpeg({ quality: 90 }).toBuffer({ resolveWithObject: false })
+      .then(b => Readable.from(b));
 
-    // Streama vidare utan lagring
-    await pump(nodeStream, res);
-  } catch (err) {
-    // Om något går snett, svara kontrollerat
-    if (!res.headersSent) {
-      res.status(400).json({ error: "bad_token" });
-    } else {
-      // headers redan skickade – stäng bara svar
-      try { res.end(); } catch {}
-    }
+    await pump(await outStream, res);
+  } catch {
+    if (!res.headersSent) res.status(400).json({ error: "bad_token" });
+    else try { res.end(); } catch {}
   }
 });
 
@@ -153,7 +214,8 @@ app.get("/download", async (req, res) => {
 ----------------------------*/
 app.get("/healthz", (_req, res) => res.send("ok"));
 
-app.listen(PORT, () =>
-  console.log(`pressify-stock-proxy listening on ${PORT}`)
-);
+app.listen(PORT, () => {
+  console.log(`pressify-stock-proxy listening on ${PORT}`);
+});
+
 
