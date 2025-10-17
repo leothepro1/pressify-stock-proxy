@@ -36,16 +36,22 @@ function normalizePexels(photo) {
     source: "pexels",
     type: "photo",
 
-    // ➕ nytt
-    url: photo.url,                          // Pexels-sidans URL
+    url: photo.url,
     author: photo.photographer,
     author_url: photo.photographer_url,
-    photographer_id: photo.photographer_id,  // ID (kan användas senare)
-    alt: photo.alt || "",                    // Alt-text för bildtext
-    author_avatar_url: null,                 // (Pexels API ger ingen avatar-URL; fallback i UI)
+    photographer_id: photo.photographer_id,
+    alt: photo.alt || "",
+    author_avatar_url: null,
 
-    // befintligt
-    thumb: photo.src?.medium,
+    // Lägg till alla relevanta storlekar
+    tiny: photo.src?.tiny,
+    small: photo.src?.small,
+    medium: photo.src?.medium,    // ~350w
+    large: photo.src?.large,      // ~940w
+    large2x: photo.src?.large2x,  // ~1880w
+
+    // Behåll befintliga fält
+    thumb: photo.src?.large || photo.src?.medium, // bättre default
     full: photo.src?.original,
     width: photo.width,
     height: photo.height,
