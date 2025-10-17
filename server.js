@@ -34,31 +34,36 @@ function normalizePexels(photo) {
   return {
     id: `prov:pexels:${photo.id}`,
     source: "pexels",
+    type: "photo",
+
+    // ➕ nytt
+    url: photo.url,                          // Pexels-sidans URL
+    author: photo.photographer,
+    author_url: photo.photographer_url,
+    photographer_id: photo.photographer_id,  // ID (kan användas senare)
+    alt: photo.alt || "",                    // Alt-text för bildtext
+    author_avatar_url: null,                 // (Pexels API ger ingen avatar-URL; fallback i UI)
+
+    // befintligt
     thumb: photo.src?.medium,
     full: photo.src?.original,
     width: photo.width,
     height: photo.height,
     orientation:
-      photo.width > photo.height
-        ? "landscape"
-        : photo.width < photo.height
-        ? "portrait"
-        : "square",
-    type: "photo",
-    author: photo.photographer,
-    author_url: photo.photographer_url,
+      photo.width > photo.height ? "landscape" :
+      photo.width < photo.height ? "portrait" : "square",
+
     attribution_required: false,
-    // Token för /download (vi lägger även width/height i token för UI-etiketter om du vill läsa därifrån)
-    download_token: Buffer.from(
-      JSON.stringify({
-        src: "pexels",
-        download_url: photo.src?.original,
-        width: photo.width,
-        height: photo.height
-      })
-    ).toString("base64"),
+
+    download_token: Buffer.from(JSON.stringify({
+      src: "pexels",
+      download_url: photo.src?.original,
+      width: photo.width,
+      height: photo.height
+    })).toString("base64"),
   };
 }
+
 
 /* ---------------------------
    /search – sök & curated
