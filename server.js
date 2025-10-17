@@ -27,6 +27,25 @@ async function maybeLoadSharp() {
   }
 }
 
+// ⇨ NEW: enkel språkdetektor från Accept-Language -> Pexels-locale
+function preferredLocale(req) {
+  const h = String(req.headers["accept-language"] || "").toLowerCase();
+  // plocka första taggen, t.ex. "sv-SE,sv;q=0.9,en;q=0.8" -> "sv-se"
+  const primary = h.split(",")[0]?.trim();
+  if (!primary) return "sv-SE";
+  // mappa några vanliga
+  if (primary.startsWith("sv")) return "sv-SE";
+  if (primary.startsWith("en")) return "en-US";
+  if (primary.startsWith("de")) return "de-DE";
+  if (primary.startsWith("fr")) return "fr-FR";
+  if (primary.startsWith("es")) return "es-ES";
+  if (primary.startsWith("it")) return "it-IT";
+  if (primary.startsWith("pt")) return "pt-BR";
+  if (primary.startsWith("nl")) return "nl-NL";
+  // fallback
+  return "sv-SE";
+}
+
 /* ---------------------------
    Normalisering från Pexels
 ----------------------------*/
@@ -84,6 +103,9 @@ app.get("/search", async (req, res) => {
     const color = (req.query.color || "").trim();
     const size = (req.query.size || "").trim();
 
+    // ⇨ NEW: läs locale från query ELLER från Accept-Language (fallback sv-SE)
+    const locale = (req.query.locale ? String(req.query.locale) : preferredLocale(req));
+
     const isTrending = !q || q.toLowerCase() === "trending";
     const base = isTrending
       ? "https://api.pexels.com/v1/curated"
@@ -96,6 +118,7 @@ app.get("/search", async (req, res) => {
     if (orientation) url.searchParams.set("orientation", orientation);
     if (color) url.searchParams.set("color", color);
     if (size) url.searchParams.set("size", size);
+    if (locale) url.searchParams.set("locale", locale); // ⇨ NEW
 
     const r = await fetch(url, { headers: { Authorization: PEXELS_KEY } });
     if (!r.ok) return res.status(r.status).json({ error: "pexels_error" });
@@ -116,7 +139,16 @@ app.get("/search", async (req, res) => {
       res.set("Cache-Control", "no-store");
     }
 
-    res.json({ results, page, per_page, total: j.total_results, has_more });
+    // ⇨ NEW: returnera även total_results + locale för klientdebug
+    res.json({
+      results,
+      page,
+      per_page,
+      total: j.total_results,           // befintligt
+      total_results: j.total_results,   // nytt alias om du vill läsa detta i klient
+      has_more,
+      locale                             // trevligt att se vad som används
+    });
   } catch {
     res.status(500).json({ error: "server_error" });
   }
@@ -228,5 +260,4 @@ app.get("/healthz", (_req, res) => res.send("ok"));
 app.listen(PORT, () => {
   console.log(`pressify-stock-proxy listening on ${PORT}`);
 });
-
 
