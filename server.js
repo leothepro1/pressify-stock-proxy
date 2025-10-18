@@ -106,13 +106,18 @@ app.get("/search", async (req, res) => {
     // ⇨ NEW: läs locale från query ELLER från Accept-Language (fallback sv-SE)
     const locale = (req.query.locale ? String(req.query.locale) : preferredLocale(req));
 
-    const isTrending = !q || q.toLowerCase() === "trending";
-    const base = isTrending
-      ? "https://api.pexels.com/v1/curated"
-      : "https://api.pexels.com/v1/search";
+ const isTrending = !q || q.toLowerCase() === "trending";
+    const filtersOn = !!(orientation || color || size);
+    const forceSearch = isTrending && filtersOn;
+    const base = forceSearch
+      ? "https://api.pexels.com/v1/search"
+      : (isTrending ? "https://api.pexels.com/v1/curated" : "https://api.pexels.com/v1/search");
 
     const url = new URL(base);
-    if (!isTrending) url.searchParams.set("query", q);
+    if (base.includes("/search")) {
+      const effectiveQuery = !isTrending ? q : "popular";
+      url.searchParams.set("query", effectiveQuery);
+    }
     url.searchParams.set("page", String(page));
     url.searchParams.set("per_page", String(per_page));
     if (orientation) url.searchParams.set("orientation", orientation);
